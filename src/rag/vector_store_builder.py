@@ -1,7 +1,8 @@
+from langchain_core.indexing import index, InMemoryRecordManager, IndexingResult
 import chromadb
 import torch
 import logging
-from typing import List, Optional
+from typing import List, Optional, Literal
 from pathlib import Path
 
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -12,21 +13,23 @@ logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "knowledge_base"
 
+
 class VectorStoreBuilder:
     def __init__(
         self,
-        model_name: str = "BAAI/bge-small-zh-v1.5",
-        index_save_path: str = "./vector_index",
+        model_name: str,
+        index_save_path: str,
     ):
         self.model_name = model_name
         self.index_save_path = index_save_path
         self.embeddings = None
         self.vectorstore: Optional[Chroma] = None
         self._client: Optional[chromadb.ClientAPI] = None
+        self._record_manager: Optional[InMemoryRecordManager] = None
         self.setup_embeddings()
 
     def setup_embeddings(self):
-        """Setup embeddings"""
+        """Setup embeddings with local file cache"""
         logger.info(f"Initializing embedding model: {self.model_name}")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.embeddings = HuggingFaceEmbeddings(
@@ -34,8 +37,22 @@ class VectorStoreBuilder:
             model_kwargs={"device": device},
             encode_kwargs={"normalize_embeddings": True},
         )
+        logger.info(f"Embedding model initialized on {device}")
 
-        logger.info("Embedding model initialized successfully")
+    def _get_record_manager(self) -> InMemoryRecordManager:
+        """Get an InMemoryRecordManager for dedup tracking.
+        
+        Note: InMemoryRecordManager state is lost on restart. This means
+        re-indexing the same documents after restart will re-embed them.
+        For production, consider upgrading langchain-core (>=0.3) which
+        includes SQLRecordManager for persistent dedup state.
+        """
+        if self._record_manager is None:
+            self._record_manager = InMemoryRecordManager(
+                namespace=COLLECTION_NAME,
+            )
+            self._record_manager.create_schema()
+        return self._record_manager
 
     def _get_client(self) -> chromadb.ClientAPI:
         """
@@ -79,76 +96,43 @@ class VectorStoreBuilder:
         except Exception:
             return False
 
-    def build_vector_index(self, chunks: List[Document]) -> Chroma:
+    def index_documents(
+        self,
+        chunks: List[Document],
+        cleanup: Literal["incremental", "full", "scoped_full"] = "incremental",
+    ) -> IndexingResult:
         """
-        Build a Chroma vector index from the provided document chunks.
+        Index documents using langchain's index() API with automatic deduplication and change detection.
 
         Args:
             chunks: List of Document objects to be indexed
+            cleanup: Cleanup mode - "incremental", "full", or "scoped_full"
 
         Returns:
-            Chroma vector store
+            Indexing result
         """
-        logger.info("Building Chroma vector index...")
-
         if not chunks:
             raise ValueError("Document chunk list cannot be empty")
 
-        self.reset_collection()
-
-        client = self._get_client()
-        # Build Chroma vector store
-        self.vectorstore = Chroma.from_documents(
-            documents=chunks,
-            embedding=self.embeddings,
-            client=client,
-            collection_name=COLLECTION_NAME,
-        )
-
-        logger.info(f"Vector index built successfully with {len(chunks)} documents")
-        return self.vectorstore
-
-    def add_documents(self, new_chunks: List[Document]):
-        """
-        Add new documents to the existing index
-
-        Args:
-            new_chunks: List of new document chunks
-        """
-        if not new_chunks:
-            raise ValueError("New document chunk list cannot be empty")
+        logger.info(f"Indexing {len(chunks)} documents with cleanup mode: {cleanup}...")
 
         vectorstore = self._get_vectorstore()
-        logger.info(f"Adding {len(new_chunks)} new documents to the index...")
-        vectorstore.add_documents(new_chunks)
-        logger.info("New documents added successfully")
+        record_manager = self._get_record_manager()
 
-    def delete_documents_by_source(self, sources: List[str]):
-        """
-        Delete documents from the index based on their source
+        result = index(
+            docs_source=chunks,
+            record_manager=record_manager,
+            vector_store=vectorstore,
+            cleanup=cleanup,
+            source_id_key="source",
+            key_encoder="sha256"
+        )
 
-        Args:
-            sources: List of document sources to be deleted
-        """
-        if not sources:
-            raise ValueError("Source list cannot be empty")
-
-        client = self._get_client()
-        try:
-            collection = client.get_collection(name=COLLECTION_NAME)
-        except Exception as e:
-            logger.error(f"Error deleting documents: {e}")
-            return
-
-        for source in sources:
-            results = collection.get(where={"source": source})
-            if results and results["ids"]:
-                collection.delete(ids=results["ids"])
-                logger.info(
-                    f"Deleted {len(results['ids'])} documents with source: {source}"
-                )
-
-        self.vectorstore = None
+        logger.info(
+            f"Indexing complete: +{result['num_added']} ~{result['num_updated']} "
+            f"-{result['num_deleted']} = {result['num_skipped']}"
+        )
+        return result
 
     def get_all_documents(self) -> List[Document]:
         """

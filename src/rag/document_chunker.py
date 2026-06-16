@@ -1,5 +1,5 @@
-import logging
 import hashlib
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -79,13 +79,13 @@ class DocumentChunker:
                 logger.error(f"Error reading file {md_file}: {e}")
 
         for doc in documents:
-            self._enhace_metadata(doc)
+            self._enhance_metadata(doc)
 
         self.documents = documents
         logger.info(f"Successfully loaded {len(documents)} documents")
         return documents
 
-    def _enhace_metadata(self, doc: Document) -> None:
+    def _enhance_metadata(self, doc: Document) -> None:
         """
         Enhance document metadata - extract category information from file path hierarchy
 
@@ -98,7 +98,7 @@ class DocumentChunker:
         try:
             relative = file_path.resolve().relative_to(data_root)
             path_hierarchy = list(relative.parent.parts)
-        except ValueError, RuntimeError:
+        except (ValueError, RuntimeError):
             path_hierarchy = []
 
         doc.metadata["doc_name"] = file_path.stem
@@ -106,7 +106,7 @@ class DocumentChunker:
         doc.metadata["primary_category"] = (
             path_hierarchy[0] if len(path_hierarchy) >= 1 else ""
         )
-        doc.metadata["subcategory"] = (
+        doc.metadata["sub_category"] = (
             path_hierarchy[1] if len(path_hierarchy) >= 2 else ""
         )
 
@@ -182,6 +182,9 @@ class DocumentChunker:
 
                 for i, chunk in enumerate(md_chunks):
                     child_id = str(uuid.uuid4())
+                    content_hash = hashlib.sha256(
+                        chunk.page_content.encode("utf-8")
+                    ).hexdigest()
                     chunk.metadata.update(doc.metadata)
                     chunk.metadata.update(
                         {
@@ -189,6 +192,7 @@ class DocumentChunker:
                             "parent_id": parent_id,
                             "doc_type": "child",
                             "chunk_index": i,
+                            "content_hash": content_hash,
                         }
                     )
 
@@ -212,7 +216,7 @@ class DocumentChunker:
         Filter documents by metadata field.
 
         Args:
-            field: Metadata field name (e.g. primary_category, subcategory, doc_name)
+            field: Metadata field name (e.g. primary_category, sub_category, doc_name)
             value: Expected field Value
 
         Returns:
@@ -235,7 +239,7 @@ class DocumentChunker:
 
         for doc in self.documents:
             pc = doc.metadata.get("primary_category", "")
-            sc = doc.metadata.get("subcategory", "")
+            sc = doc.metadata.get("sub_category", "")
             primary_categories[pc] = primary_categories.get(pc, 0) + 1
             if sc:
                 subcategories[sc] = subcategories.get(sc, 0) + 1
@@ -277,7 +281,7 @@ class DocumentChunker:
                 parent_ids.add(parent_id)
 
             pc = chunk.metadata.get("primary_category", "")
-            sc = chunk.metadata.get("subcategory", "")
+            sc = chunk.metadata.get("sub_category", "")
             if pc:
                 primary_categories[pc] = primary_categories.get(pc, 0) + 1
             if sc:
@@ -311,7 +315,7 @@ class DocumentChunker:
                     "source": doc.metadata.get("source"),
                     "doc_name": doc.metadata.get("doc_name"),
                     "primary_category": doc.metadata.get("primary_category"),
-                    "subcategory": doc.metadata.get("subcategory"),
+                    "sub_category": doc.metadata.get("sub_category"),
                     "path_hierarchy": doc.metadata.get("path_hierarchy"),
                     "content_length": len(doc.page_content),
                 }

@@ -8,7 +8,8 @@ class RAGConfig:
     index_save_path: str = "./knowledge_base_store"
 
     embedding_model: str = "D:/modelscope/hub/models/microsoft/harrier-oss-v1-0___6b"
-    llm_model: str = "kimi-k2.6"
+    llm_model: str = "deepseek-v4-pro"
+    evaluation_testset_path: str = "./test/evaluation/testset.jsonl"
 
     top_k: int = 3
 

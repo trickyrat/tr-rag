@@ -1,11 +1,95 @@
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
+from pydantic import Field, PrivateAttr
 import logging
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
+
+from rank_bm25 import BM25Okapi
 
 from langchain_chroma import Chroma
-from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
 
 logger = logging.getLogger(__name__)
+
+
+def _tokenize(text: str) -> List[str]:
+    """Tokenize text for BM25: lowercase + split on non-alphanumeric for English,
+    and character-level for CJK characters."""
+    # Normalize
+    text = text.lower().strip()
+    # Split on whitespace and punctuation, keeping CJK chars as individual tokens
+    tokens = re.findall(r"[\u4e00-\u9fff]|[a-z0-9]+", text)
+    return tokens if tokens else text.split()
+
+
+class HybridRetriever(BaseRetriever):
+    vectorstore: Chroma
+    chunks: List[Document] = Field(default_factory=list)
+    vector_k: int = 5
+    bm25_k: int = 5
+    top_k: int = 3
+    rrf_constant: int = 60
+
+    _bm25_index: Optional[BM25Okapi] = PrivateAttr(default=None)
+    _tokenized_corpus: Optional[List[List[str]]] = PrivateAttr(default=None)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _get_bm25_index(self) -> BM25Okapi:
+        if self._bm25_index is None:
+            logger.info("Building BM25 index (first use)...")
+            self._tokenized_corpus = [_tokenize(doc.page_content) for doc in self.chunks]
+            self._bm25_index = BM25Okapi(self._tokenized_corpus)
+            logger.info("BM25 index built successfully")
+        return self._bm25_index
+
+    def _bm25_search(self, query: str) -> List[Document]:
+        bm25 = self._get_bm25_index()
+        tokenized_query = _tokenize(query)
+        scores = bm25.get_scores(tokenized_query)
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[
+            : self.bm25_k
+        ]
+        return [self.chunks[i] for i in top_indices if scores[i] > 0]
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        vector_docs = self.vectorstore.similarity_search(query, k=self.vector_k)
+        bm25_docs = self._bm25_search(query)
+        return self._rrf_rerank(vector_docs, bm25_docs)[: self.top_k]
+
+    def _rrf_rerank(
+        self, vector_docs: List[Document], bm25_docs: List[Document]
+    ) -> List[Document]:
+        k = self.rrf_constant
+        doc_scores: Dict[str, float] = {}
+        doc_objects: Dict[str, Document] = {}
+
+        for rank, doc in enumerate(vector_docs):
+            doc_id = doc.metadata.get("chunk_id", str(hash(doc.page_content)))
+            doc_objects[doc_id] = doc
+            doc_scores[doc_id] = doc_scores.get(doc_id, 0) + 1.0 / (k + rank + 1)
+
+        for rank, doc in enumerate(bm25_docs):
+            doc_id = doc.metadata.get("chunk_id", str(hash(doc.page_content)))
+            doc_objects[doc_id] = doc
+            doc_scores[doc_id] = doc_scores.get(doc_id, 0) + 1.0 / (k + rank + 1)
+
+        # Sort documents by their combined scores
+        sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+        reranked = []
+        for doc_id, score in sorted_docs:
+            doc = doc_objects[doc_id]
+            doc.metadata["rrf_score"] = score
+            reranked.append(doc)
+
+        logger.info(
+            f"RRF reranking: {len(vector_docs)} vector + {len(bm25_docs)} BM25 -> {len(reranked)} merged"
+        )
+        return reranked
 
 
 class RetrievalOptimization:
@@ -21,19 +105,9 @@ class RetrievalOptimization:
         """
         self.vectorstore = vectorstore
         self.chunks = chunks
-        self.setup_retrievers()
-
-    def setup_retrievers(self):
-        """Setup the retrievers for both vector search and BM25 search"""
-        logger.info("Setting up retrievers...")
-
-        self.vector_retriever = self.vectorstore.as_retriever(
-            search_type="similarity", search_kwargs={"k": 5}
+        self.hybrid_retriever = HybridRetriever(
+            vectorstore=self.vectorstore, chunks=self.chunks
         )
-
-        self.bm25_retriever = BM25Retriever.from_documents(self.chunks, k=5)
-
-        logger.info("Retrievers setup completed")
 
     def hybrid_search(self, query: str, top_k: int = 3) -> List[Document]:
         """
@@ -47,11 +121,8 @@ class RetrievalOptimization:
             List of retrieved documents
         """
 
-        vector_docs = self.vector_retriever.invoke(query)
-        bm25_docs = self.bm25_retriever.invoke(query)
-
-        reranked_docs = self._rrf_rerank(vector_docs, bm25_docs)
-        return reranked_docs[:top_k]
+        self.hybrid_retriever.top_k = top_k
+        return self.hybrid_retriever.invoke(query)
 
     def metadata_filtered_search(
         self, query: str, filters: Dict[str, Any], top_k: int = 5
@@ -68,85 +139,14 @@ class RetrievalOptimization:
             Filtered list of documents
         """
 
-        docs = self.hybrid_search(query, top_k * 3)
-
-        filtered_docs = []
-        for doc in docs:
-            match = True
-            for key, value in filters.items():
-                if key in doc.metadata:
-                    if isinstance(value, list):
-                        if doc.metadata[key] not in value:
-                            match = False
-                            break
-                    else:
-                        if doc.metadata[key] != value:
-                            match = False
-                            break
-                else:
-                    match = False
-                    break
-
-            if match:
-                filtered_docs.append(doc)
-                if len(filtered_docs) >= top_k:
-                    break
-
-        return filtered_docs
-
-    def _rrf_rerank(
-        self, vector_docs: List[Document], bm25_docs: List[Document], k: int = 60
-    ) -> List[Document]:
-        """
-        Re-rank documents using RRF (Reciprocal Rank Fusion) algorithm
-
-        Args:
-            vector_docs: Vector search results
-            bm25_docs: BM25 search results
-            k: RRF parameter, used for smoothing rankings
-
-        Returns:
-            Re-ranked list of documents
-        """
-        doc_scores = {}
-        doc_objects = {}
-
-        for rank, doc in enumerate(vector_docs):
-            doc_id = hash(doc.page_content)
-            doc_objects[doc_id] = doc
-
-            rrf_score = 1.0 / (k + rank + 1)
-            doc_scores[doc_id] = doc_scores.get(doc_id, 0) + rrf_score
-
-            logger.debug(
-                f"Vector search - Document {rank + 1}: RRF score = {rrf_score:.4f}"
-            )
-
-        for rank, doc in enumerate(bm25_docs):
-            doc_id = hash(doc.page_content)
-            doc_objects[doc_id] = doc
-
-            rrf_score = 1.0 / (k + rank + 1)
-            doc_scores[doc_id] = doc_scores.get(doc_id, 0) + rrf_score
-
-            logger.debug(
-                f"BM25 search - Document {rank + 1}: RRF score = {rrf_score:.4f}"
-            )
-
-        sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
-
-        reranked_docs = []
-        for doc_id, final_score in sorted_docs:
-            if doc_id in doc_objects:
-                doc = doc_objects[doc_id]
-                doc.metadata["rrf_score"] = final_score
-                reranked_docs.append(doc)
-                logger.debug(
-                    f"Final ranking - Document: {doc.page_content[:50]}... Final RRF score: {final_score:.4f}"
-                )
-
-        logger.info(
-            f"RRF re-ranking completed: Vector search {len(vector_docs)} documents, BM25 search {len(bm25_docs)} documents, merged {len(reranked_docs)} documents"
-        )
-
-        return reranked_docs
+        try:
+            return self.vectorstore.similarity_search(query, k=top_k, filters=filters)
+        except Exception as e:
+            logger.error(f"Native filter failed ({e}), falling back to post-filtering")
+            docs = self.hybrid_search(query, top_k * 3)
+            filtered = [
+                doc
+                for doc in docs
+                if all(doc.metadata.get(k) == v for k, v in filters.items())
+            ]
+            return filtered[:top_k]

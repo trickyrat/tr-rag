@@ -91,7 +91,7 @@ class RAGSystem:
 
             # 4. 构建向量索引
             print("构建向量索引...")
-            vectorstore = self.vector_builder.build_vector_index(chunks)
+            vectorstore = self.vector_builder.index_documents(chunks)
 
             # 5. 保存索引
             print("保存向量索引...")
