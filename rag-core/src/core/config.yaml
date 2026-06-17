@@ -1,0 +1,38 @@
+# RAG System Configuration
+# =========================
+# Override any field via environment variable with RAG_ prefix, e.g.:
+#   RAG_TOP_K=5 uv run rag_runner.py
+
+# ── paths ──────────────────────────────────────────────────────
+knowledge_base_path: "./knowledge_base"
+index_save_path: "./knowledge_base_store"
+evaluation_testset_path: "./test/evaluation/testset.jsonl"
+
+# ── models ─────────────────────────────────────────────────────
+embedding_model: "D:/models/BAAI/bge-m3"
+llm_model: "deepseek-v4-pro"
+
+# ── retrieval ──────────────────────────────────────────────────
+top_k: 3
+vector_k: 30
+bm25_k: 10
+sparse_k: 30
+rrf_constant: 60
+
+# ── chunking ───────────────────────────────────────────────────
+chunk_size: 512
+chunk_overlap: 64
+use_markdown_parser: false   # false=legacy(105), true=MarkdownParser(186)
+use_parent_expansion: false
+
+# ── hybrid retrieval ───────────────────────────────────────────
+use_sparse: false             # bge-m3 sparse; false = pure vector
+
+# ── cross-encoder reranking ────────────────────────────────────
+use_cross_encoder: true
+cross_encoder_model: "D:/models/BAAI/bge-reranker-v2-m3"
+cross_encoder_top_k: 30       # candidates fed into cross-encoder
+
+# ── generation ─────────────────────────────────────────────────
+temperature: 0.1
+max_tokens: 2048

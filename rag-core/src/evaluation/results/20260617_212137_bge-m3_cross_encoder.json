@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-06-17T13:21:37.836324+00:00",
+  "config": {
+    "chunker": "legacy",
+    "embedding_model": "bge-m3",
+    "retrieval_strategy": "cross_encoder",
+    "use_cross_encoder": true,
+    "cross_encoder_model": "bge-reranker-v2-m3",
+    "use_sparse": false,
+    "use_parent_expansion": false,
+    "top_k": 3,
+    "vector_k": 30,
+    "sparse_k": 30,
+    "rrf_constant": 60,
+    "chunk_size": 512,
+    "chunk_overlap": 64,
+    "num_chunks": 105
+  },
+  "metrics": {
+    "hit@1": 0.7667,
+    "hit@3": 0.9,
+    "mrr": 0.8306
+  },
+  "elapsed_seconds": 42.5
+}
