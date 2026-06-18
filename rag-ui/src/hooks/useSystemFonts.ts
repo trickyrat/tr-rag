@@ -18,7 +18,7 @@ export function useSystemFonts() {
   const [fonts, setFonts] = useState<Font[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isApiSupported, setIsApiSupported] = useState<boolean>(
+  const [isApiSupported, _setIsApiSupported] = useState<boolean>(
     'queryLocalFonts' in window
   );
   const [isAuthorized, setIsAuthorized] = useState<boolean>(false);
